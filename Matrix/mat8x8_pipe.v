@@ -13,6 +13,15 @@ module mat8x8_pipe #( parameter mat_size = 64; ) (
     reg [3:0] B [7:0][7:0];
 
 
+
+    // Multiplication dependencies
+    reg [7:0] multiply_output [7:0];
+    wire [7:0] multiply_done;
+    wire multiRst;
+    wire multiDone;
+    assign multiDone = &multiply_done; 
+    //----------------------------------
+
     // Step 1: Obtaining Row and Column values
     integer i, j;
     always @(posedge clk) begin 
@@ -24,6 +33,7 @@ module mat8x8_pipe #( parameter mat_size = 64; ) (
                 end
             end
             done <= 1'b0;
+            multiRst <= 1'b1;
         end elsif (start) begin 
                 for (i = 0; i < 8; i = i + 1) begin
                     for (j = 0; j < 8; j = j + 1) begin
@@ -31,49 +41,103 @@ module mat8x8_pipe #( parameter mat_size = 64; ) (
                         B[i][j] = arr2[(i*8 + j)*4 +: 4];
                     end
                 end
+            end else begin 
+                multiRst <= 1'b0;
             end
     end
 
 
 
     // Flip Flop
-    reg [4:0] curRowA [7:0];
-    reg [4:0] curColB [7:0];
-    wire curFilled;
+    reg [3:0] curRowA [7:0];
+    reg [3:0] curColB [7:0];
     reg [2:0] rowCount;
     reg [2:0] colCount;
-    // if the final value of the array has a value in it, then it must be full
+    wire curFilled;
     wire rowChange;
     wire colChange;
 
+    localparam NONE = 3'b000;
+    localparam INIT = 3'b001;
+    localparam ROW = 3'b010;
+    localparam COLUMN = 3'b011;
 
+    reg [2:0] cur_state, next_state;
 
-    integer k;
-    if (rowChange) begin
-        for (k = 0; k < 8; k = k + 1) begin
-            curRowA[k] = A[rowCount][k];
+    always @(posedge clk) begin 
+        if (rst) begin 
+            cur_state <= INIT; 
+        end else begin 
+            cur_state <= next_state;
         end
-        rowChange <= 1'b0;
     end
 
-    integer l;
-    if (colChange) begin
-        for (l = 0; l < 8; l = l + 1) begin
-            curColB[l] = B[l][colCount];
+    always @(posedge clk) begin 
+        rowCount <= 4'b0000;
+        colCount <= 4'b0000;
+        if (cur_state == COLUMN) begin
+            colChange <= 1'b1; 
+            if (colCount == 8) begin 
+                colCount <= 4'b0000;
+            end else begin 
+                colCount <= colCount + 1;
+            end
         end
-        colChange <= 1'b0;
+        if (cur_state == ROW) begin 
+            rowCount <= rowCount + 1;
+            rowChange <= 1'b1;
+        end
+        if (cur_state == INIT) begin 
+            curFilled <= 1'b1;
+        end
+        if (multiDone) begin 
+            curFilled <= 1'b0;
+        end
+
     end
+
+    integer k,l;
+    always @(*) begin 
+        next_state = cur_state;
+        case(cur_state)
+            INIT: begin
+                for (k = 0; k < 8; k = k + 1) begin
+                    curRowA[k] = 4'b0000;
+                    curColB[k] = 4'b0000;
+                end
+                next_state = NONE;
+            end
+
+            ROW: begin 
+                for (k = 0; k < 8; k = k + 1) begin
+                    curRowA[k] = A[rowCount][k];
+                end
+                next_state = COLUMN;
+            end
+
+            COLUMN: begin
+                for (l = 0; l < 8; l = l + 1) begin
+                    curColB[l] = B[l][colCount];
+                end
+                next_state = NONE;
+            end
+
+            NONE: begin 
+                if (!curFilled) begin 
+                    if (colCount == 8) begin 
+                        next_state = ROW;
+                    end else begin 
+                        next_state = COLUMN;
+                    end
+                end
+            end
+    end
+    
 
 
 
     // Step 2: Multiply
     // 8 multiplications in parallel
-    reg [7:0] multiply_output [7:0];
-    wire [7:0] multiply_done;
-
-    wire multiRst;
-    wire multiDone;
-    assign multiDone = &multiply_done; 
     
     multiplier_4bit multiply1 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[0]), .B(curColB[0]), .P(multiply_output[0]), .done(multiply_done[0]));
     multiplier_4bit multiply2 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[1]), .B(curColB[1]), .P(multiply_output[1]), .done(multiply_done[1]));
@@ -84,11 +148,7 @@ module mat8x8_pipe #( parameter mat_size = 64; ) (
     multiplier_4bit multiply7 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[6]), .B(curColB[6]), .P(multiply_output[6]), .done(multiply_done[6]));
     multiplier_4bit multiply8 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[7]), .B(curColB[7]), .P(multiply_output[7]), .done(multiply_done[7]));
 
-    always @(posedge clk) begin 
-        if (multiDone) begin 
-            curFilled <= 1'b0;
-        end
-    end
+
 
     // Step 3: Add
     // --- Level 1 Wires & Registers ---
@@ -117,6 +177,7 @@ module mat8x8_pipe #( parameter mat_size = 64; ) (
     wire [10:0] add_rslt_w;
     full_adder_nbit #(10) add3_0 (.clk(clk), .rst(adderRst), .start(multiDone), .a(s2_0), .b(s2_1), .sum(add_rslt_w), .done(adder_done[6]));
     
+
     always @(posedge clk) begin 
         if (adderRst) begin
             s1_0 <= 9'b0;
@@ -147,6 +208,12 @@ module mat8x8_pipe #( parameter mat_size = 64; ) (
     
     reg [5:0] matCount;
     always @(posedge clk) begin 
+        if (rst) begin 
+            adderRst <= 1'b1;
+        end else begin 
+            adderRst <= 1'b0;
+        end
+
         if (adderDone && !(matCount == 6'd63)) begin
           matCount <= matCount + 1;
           adderRst <= 1'b1;
