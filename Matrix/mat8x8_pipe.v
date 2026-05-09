@@ -1,230 +1,197 @@
-module mat8x8_pipe #( parameter mat_size = 64; ) (
-    // Two flattened input arrays for our 8X8 matrix
+module mat8x8_pipe #(parameter N = 64)(
     input clk,
     input rst,
     input start,
-    input [(mat_size * 4)-1:0] arr1,
-    input [(mat_size * 4)-1:0] arr2,
-    output [(mat_size * 11)-1:0] mat,
-    output done
-    );
 
-    reg [3:0] A [7:0][7:0];
-    reg [3:0] B [7:0][7:0];
+    input  [N*8-1:0] arr1,
+    input  [N*8-1:0] arr2,
 
+    output reg [N*19-1:0] mat,
+    output reg done
+);
 
+    // ----------------------------
+    // MEMORY
+    // ----------------------------
+    reg [7:0] A [0:7][0:7];
+    reg [7:0] B [0:7][0:7];
 
-    // Multiplication dependencies
-    reg [7:0] multiply_output [7:0];
-    wire [7:0] multiply_done;
-    wire multiRst;
-    wire multiDone;
-    assign multiDone = &multiply_done; 
-    //----------------------------------
+    // ----------------------------
+    // FSM
+    // ----------------------------
+    localparam IDLE = 2'b00;
+    localparam RUN  = 2'b01;
+    localparam DONE = 2'b10;
 
-    // Step 1: Obtaining Row and Column values
-    integer i, j;
-    always @(posedge clk) begin 
+    reg [1:0] state, next_state;
+
+    always @(posedge clk) begin
+        if (rst)
+            state <= IDLE;
+        else
+            state <= next_state;
+    end
+
+    always @(*) begin
+        next_state = state;
+
+        case (state)
+            IDLE: if (start) next_state = RUN;
+            RUN:  if (matCount == 6'd64) next_state = DONE;
+            DONE: next_state = DONE;
+        endcase
+    end
+
+    wire compute_en = (state == RUN);
+
+    // ----------------------------
+    // LOAD INPUTS
+    // ----------------------------
+    integer i, j, k, q;
+
+    always @(posedge clk) begin
         if (rst) begin
-            for (i = 0; i < 8; i = i + 1) begin
+            for (i = 0; i < 8; i = i + 1)
                 for (j = 0; j < 8; j = j + 1) begin
-                    A[i][j] = 4'b0000;
-                    B[i][j] = 4'b0000;
+                    A[i][j] <= 0;
+                    B[i][j] <= 0;
                 end
-            end
-            done <= 1'b0;
-            multiRst <= 1'b1;
-        end elsif (start) begin 
-                for (i = 0; i < 8; i = i + 1) begin
-                    for (j = 0; j < 8; j = j + 1) begin
-                        A[i][j] = arr1[(i*8 + j)*4 +: 4];
-                        B[i][j] = arr2[(i*8 + j)*4 +: 4];
-                    end
+        end
+        else if (state == IDLE && start) begin
+            for (i = 0; i < 8; i = i + 1)
+                for (j = 0; j < 8; j = j + 1) begin
+                    A[i][j] <= arr1[(i*8 + j)*8 +: 8];
+                    B[i][j] <= arr2[(i*8 + j)*8 +: 8];
                 end
-            end else begin 
-                multiRst <= 1'b0;
-            end
-    end
-
-
-
-    // Flip Flop
-    reg [3:0] curRowA [7:0];
-    reg [3:0] curColB [7:0];
-    reg [2:0] rowCount;
-    reg [2:0] colCount;
-    wire curFilled;
-    wire rowChange;
-    wire colChange;
-
-    localparam NONE = 3'b000;
-    localparam INIT = 3'b001;
-    localparam ROW = 3'b010;
-    localparam COLUMN = 3'b011;
-
-    reg [2:0] cur_state, next_state;
-
-    always @(posedge clk) begin 
-        if (rst) begin 
-            cur_state <= INIT; 
-        end else begin 
-            cur_state <= next_state;
         end
     end
 
-    always @(posedge clk) begin 
-        rowCount <= 4'b0000;
-        colCount <= 4'b0000;
-        if (cur_state == COLUMN) begin
-            colChange <= 1'b1; 
-            if (colCount == 8) begin 
-                colCount <= 4'b0000;
-            end else begin 
-                colCount <= colCount + 1;
-            end
-        end
-        if (cur_state == ROW) begin 
-            rowCount <= rowCount + 1;
-            rowChange <= 1'b1;
-        end
-        if (cur_state == INIT) begin 
-            curFilled <= 1'b1;
-        end
-        if (multiDone) begin 
-            curFilled <= 1'b0;
-        end
-
-    end
-
-    integer k,l;
-    always @(*) begin 
-        next_state = cur_state;
-        case(cur_state)
-            INIT: begin
-                for (k = 0; k < 8; k = k + 1) begin
-                    curRowA[k] = 4'b0000;
-                    curColB[k] = 4'b0000;
-                end
-                next_state = NONE;
-            end
-
-            ROW: begin 
-                for (k = 0; k < 8; k = k + 1) begin
-                    curRowA[k] = A[rowCount][k];
-                end
-                next_state = COLUMN;
-            end
-
-            COLUMN: begin
-                for (l = 0; l < 8; l = l + 1) begin
-                    curColB[l] = B[l][colCount];
-                end
-                next_state = NONE;
-            end
-
-            NONE: begin 
-                if (!curFilled) begin 
-                    if (colCount == 8) begin 
-                        next_state = ROW;
-                    end else begin 
-                        next_state = COLUMN;
-                    end
-                end
-            end
-    end
-    
-
-
-
-    // Step 2: Multiply
-    // 8 multiplications in parallel
-    
-    multiplier_4bit multiply1 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[0]), .B(curColB[0]), .P(multiply_output[0]), .done(multiply_done[0]));
-    multiplier_4bit multiply2 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[1]), .B(curColB[1]), .P(multiply_output[1]), .done(multiply_done[1]));
-    multiplier_4bit multiply3 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[2]), .B(curColB[2]), .P(multiply_output[2]), .done(multiply_done[2]));
-    multiplier_4bit multiply4 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[3]), .B(curColB[3]), .P(multiply_output[3]), .done(multiply_done[3]));
-    multiplier_4bit multiply5 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[4]), .B(curColB[4]), .P(multiply_output[4]), .done(multiply_done[4]));
-    multiplier_4bit multiply6 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[5]), .B(curColB[5]), .P(multiply_output[5]), .done(multiply_done[5]));
-    multiplier_4bit multiply7 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[6]), .B(curColB[6]), .P(multiply_output[6]), .done(multiply_done[6]));
-    multiplier_4bit multiply8 (.clk(clk), .rst(multiRst), start(curFilled), .A(curRowA[7]), .B(curColB[7]), .P(multiply_output[7]), .done(multiply_done[7]));
-
-
-
-    // Step 3: Add
-    // --- Level 1 Wires & Registers ---
-    wire [6:0] adder_done;
-
-    wire adderRst;
-    wire adderDone;
-    assign adderDone = &adder_done;
-
-    wire [8:0] s1_0w, s1_1w, s1_2w, s1_3w;
-    reg  [8:0] s1_0, s1_1, s1_2, s1_3;
-
-    full_adder_nbit #(8) add1_0 (.clk(clk), .rst(adderRst), .start(multiDone), .a(multiply_output[0]), .b(multiply_output[1]), .sum(s1_0w), .done(adder_done[0]));
-    full_adder_nbit #(8) add1_1 (.clk(clk), .rst(adderRst), .start(multiDone), .a(multiply_output[2]), .b(multiply_output[3]), .sum(s1_1w), .done(adder_done[1]));
-    full_adder_nbit #(8) add1_2 (.clk(clk), .rst(adderRst), .start(multiDone), .a(multiply_output[4]), .b(multiply_output[5]), .sum(s1_2w), .done(adder_done[2]));
-    full_adder_nbit #(8) add1_3 (.clk(clk), .rst(adderRst), .start(multiDone), .a(multiply_output[6]), .b(multiply_output[7]), .sum(s1_3w), .done(adder_done[3]));
-
-    // --- Level 2 Wires & Registers ---
-    wire [9:0] s2_0w, s2_1w;
-    reg  [9:0] s2_0, s2_1;
-
-    full_adder_nbit #(9) add2_0 (.clk(clk), .rst(adderRst), .start(multiDone), .a(s1_0), .b(s1_1), .sum(s2_0w), .done(adder_done[4]));
-    full_adder_nbit #(9) add2_1 (.clk(clk), .rst(adderRst), .start(multiDone), .a(s1_2), .b(s1_3), .sum(s2_1w), .done(adder_done[5]));
-
-    // --- Level 3 Wire ---
-    wire [10:0] add_rslt_w;
-    full_adder_nbit #(10) add3_0 (.clk(clk), .rst(adderRst), .start(multiDone), .a(s2_0), .b(s2_1), .sum(add_rslt_w), .done(adder_done[6]));
-    
-
-    always @(posedge clk) begin 
-        if (adderRst) begin
-            s1_0 <= 9'b0;
-            s1_1 <= 9'b0;
-        end else if (adder_done[0] && adder_done[1]) begin
-        // Only capture s1_0w and s1_1w when Level 1 is done
-            s1_0 <= s1_0w;
-            s1_1 <= s1_1w;
-        end
-    end
-
-    always @(posedge clk) begin 
-        if (adderRst) begin
-            s2_0 <= 10'b0;
-            s2_1 <= 10'b0;
-        end else if (adder_done[4] && adder_done[5]) begin
-        // Capture Level 2 results once add2_0 and add2_1 are done
-            s2_0 <= s2_0w;
-            s2_1 <= s2_1w;
-        end
-    end
-
-
-    
-    // Step 4: Insert final result
-    reg [10:0] matrix_output;
-    assign matrix_output = add_rslt_w;
-    
+    // ----------------------------
+    // INDEXING (KEY SIMPLIFICATION)
+    // ----------------------------
     reg [5:0] matCount;
-    always @(posedge clk) begin 
-        if (rst) begin 
-            adderRst <= 1'b1;
-        end else begin 
-            adderRst <= 1'b0;
-        end
 
-        if (adderDone && !(matCount == 6'd63)) begin
-          matCount <= matCount + 1;
-          adderRst <= 1'b1;
-        end else begin
-          done <= 1'b1;
+    wire [2:0] row = matCount[5:3];
+    wire [2:0] col = matCount[2:0];
+
+    // ----------------------------
+    // ROW / COL SELECTION
+    // ----------------------------
+    reg [7:0] curRowA [0:7];
+    reg [7:0] curColB [0:7];
+
+    reg [7:0] curRowA_d [0:7];
+    reg [7:0] curColB_d [0:7];
+
+    always @(posedge clk) begin
+        if (compute_en) begin
+            for (k = 0; k < 8; k = k + 1) begin
+                curRowA[k] <= A[row][k];
+                curColB[k] <= B[k][col];
+            end
         end
     end
 
     always @(posedge clk) begin
-        if (adderDone && !(matCount == 6'd63)) begin 
-            mat[matCount * 11 +: 11] <= matrix_output;
+        if (compute_en) begin 
+            for (q = 0; q < 8; q = q + 1) begin
+                curRowA_d[q] <= curRowA[q];
+                curColB_d[q] <= curColB[q];
+            end
+        end 
+    end
+
+    // ----------------------------
+    // MULTIPLIER PIPELINE
+    // ----------------------------
+
+    reg [15:0] mult_out [0:7];
+    reg [15:0] mult_out_aligned [0:7];
+
+    always @(posedge clk) begin 
+        for (i = 0; i < 8; i = i + 1)
+            mult_out_aligned[i] <= mult_out[i];
+    end
+
+    genvar m;
+    generate
+        for (m = 0; m < 8; m = m + 1) begin : MUL
+            multiplier_8bit u_mul (
+                .clk(clk),
+                .rst(rst),
+                .A(curRowA_d[m]),
+                .B(curColB_d[m]),
+                .P(mult_out[m])
+            );
+        end
+    endgenerate
+
+    // ----------------------------
+    // ADDER TREE
+    // ----------------------------
+    wire [18:0] result;
+    reg [18:0] result_r;
+
+    reg [16:0] w0_r, w1_r, w2_r, w3_r;
+    wire [16:0] w0, w1, w2, w3;
+
+    wire adder_done = (state == RUN);
+
+    always @(posedge clk) begin 
+        w0_r <= w0;
+        w1_r <= w1;
+        w2_r <= w2;
+        w3_r <= w3;
+    end
+
+    full_adder_nbit #(16) a0 (.clk(clk), .rst(rst),
+        .a(mult_out_aligned[0]), .b(mult_out_aligned[1]), .sum(w0));
+
+    full_adder_nbit #(16) a1 (.clk(clk), .rst(rst),
+        .a(mult_out_aligned[2]), .b(mult_out_aligned[3]), .sum(w1));
+
+    full_adder_nbit #(16) a2 (.clk(clk), .rst(rst),
+        .a(mult_out_aligned[4]), .b(mult_out_aligned[5]), .sum(w2));
+
+    full_adder_nbit #(16) a3 (.clk(clk), .rst(rst),
+        .a(mult_out_aligned[6]), .b(mult_out_aligned[7]), .sum(w3));
+
+
+    wire [18:0] t0, t1;
+
+    full_adder_nbit #(17) b0 (.clk(clk), .rst(rst),
+        .a(w0_r), .b(w1_r), .sum(t0));
+
+    full_adder_nbit #(17) b1 (.clk(clk), .rst(rst),
+        .a(w2_r), .b(w3_r), .sum(t1));
+
+
+
+    full_adder_nbit #(18) c0 (.clk(clk), .rst(rst),
+        .a(t0), .b(t1), .sum(result));
+
+    always @(posedge clk) begin
+        result_r <= result;
+    end
+
+    // ----------------------------
+    // OUTPUT CONTROL
+    // ----------------------------
+    always @(posedge clk) begin
+        if (rst) begin
+            matCount <= 0;
+            done <= 0;
+        end
+        else if (state == RUN && adder_done) begin
+            mat[matCount * 19 +: 19] <= result_r;
+            matCount <= matCount + 1;
+            done <= 1'b0;
+        end
+        else if (state == DONE) begin
+            done <= 1'b1;
+        end
+        else if (state == IDLE && start) begin 
+            matCount <= 0;
         end
     end
 
