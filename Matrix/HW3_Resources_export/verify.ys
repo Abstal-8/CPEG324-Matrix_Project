@@ -1,0 +1,42 @@
+# verify.ys
+
+# Read and prepare the ORIGINAL (Golden) design
+# Read your tech library here
+
+read_liberty -lib NangateOpenCellLibrary_typical.lib
+#read_verilog q6_v1_full_lib_syn.v
+read_verilog q6_v1_basic_gates_syn.v
+prep -flatten -top q6_v1
+
+# Stash this design in memory under the name 'gold'
+design -stash gold
+
+# Read and prepare the SANITIZED design + WRAPPER
+# Read your tech library here again for the gate design
+
+read_liberty -lib NangateOpenCellLibrary_typical.lib
+#read_verilog q6_v1_full_lib_syn_sanitized.v
+read_verilog q6_v1_basic_gates_syn_sanitized.v
+read_verilog wrapper.v
+
+# The top module is now the wrapper we created
+prep -flatten -top q6_v1_wrapper 
+
+# Stash this design in memory under the name 'gate'
+design -stash gate
+
+# Setup the equivalence checking problem
+# We copy both designs back into the main workspace
+design -copy-from gold -as gold q6_v1
+design -copy-from gate -as gate q6_v1_wrapper
+
+# Create a master module that links the inputs of both and compares the outputs
+equiv_make gold gate equiv_checker
+
+# Run the solver
+hierarchy -top equiv_checker
+equiv_simple
+equiv_induct
+
+# Check the status and assert success!
+equiv_status -assert
